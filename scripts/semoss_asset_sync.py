@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +38,24 @@ DEFAULT_API_MODULE_URL = "/cfg-ai-dev/Monolith"
 DEFAULT_WEB_MODULE_URL = "/cfg-ai-dev/SemossWeb"
 SERVER_NAME = "Semoss_project_manager"
 BACKUP_ROOT = WORKSPACE_ROOT / "temp" / "semoss_backups"
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{env:([^}]+)\}")
+
+
+def resolve_env_vars(value: str) -> str:
+    """Replace ${env:VAR_NAME} references with their environment variable values."""
+
+    def _replacer(match: re.Match) -> str:
+        var_name = match.group(1)
+        env_value = os.environ.get(var_name)
+        if env_value is None:
+            raise RuntimeError(
+                f"Environment variable '{var_name}' is not set. "
+                f"Set it with: export {var_name}=your-value"
+            )
+        return env_value
+
+    return _ENV_VAR_PATTERN.sub(_replacer, value)
 
 
 def read_json_config(config_path: Path) -> dict[str, object]:
@@ -116,6 +136,11 @@ def _extract_bearer_parts_from_server(server: dict) -> tuple[str, str]:
         raise RuntimeError("Unexpected Authorization header format in MCP config.")
 
     bearer_value = header_value[len(prefix) :]
+
+    # Resolve ${env:VAR} references (Claude Code MCP syntax)
+    if "${env:" in bearer_value:
+        bearer_value = resolve_env_vars(bearer_value)
+
     if "YOUR_ACCESS_KEY" in bearer_value or "<accessKey:secretKey>" in bearer_value:
         raise RuntimeError(
             "Replace the placeholder access key and secret key values in your MCP config "
@@ -123,7 +148,7 @@ def _extract_bearer_parts_from_server(server: dict) -> tuple[str, str]:
         )
 
     access_token, secret = bearer_value.split(":", 1)
-    return access_token, secret
+    return access_token.strip(), secret.strip()
 
 
 def load_bearer_parts(claude_config_path: Path, copilot_config_path: Path) -> tuple[str, str]:

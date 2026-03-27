@@ -1,15 +1,49 @@
 # SEMOSS Vibe Coding Setup — Claude Code
 
-A self-contained starter template for building SEMOSS applications with Claude Code. Copy this directory into a new project to get started.
+Build SEMOSS applications with Claude Code. Clone, set your credentials, run `claude`.
 
-## What This Template Includes
+## Quick Start
 
-| File | Purpose |
-|------|---------|
-| `CLAUDE.md` | Project instructions for Claude Code — SEMOSS workflows, conventions, constraints |
-| `mcp.json.example` | Example `.mcp.json` with 3 SEMOSS MCP servers pre-configured |
-| `semoss_config.example.json` | Example `semoss_config/config.json` for project metadata |
-| `scripts/semoss_asset_sync.py` | Upload local files to SEMOSS and sync remote assets to local |
+### 1. Clone and enter the project
+
+```bash
+git clone <repo-url> my-semoss-app
+cd my-semoss-app
+```
+
+### 2. Set your SEMOSS credentials
+
+Get your access key and secret key from SEMOSS: **Settings > My Profile**.
+
+**macOS / Linux (zsh or bash):**
+
+```bash
+export SEMOSS_ACCESS_KEY="your-access-key"
+export SEMOSS_SECRET_KEY="your-secret-key"
+```
+
+To persist across sessions, add those lines to `~/.zshrc` or `~/.bashrc`.
+
+**Windows (PowerShell):**
+
+```powershell
+$env:SEMOSS_ACCESS_KEY = "your-access-key"
+$env:SEMOSS_SECRET_KEY = "your-secret-key"
+```
+
+To persist, add to your PowerShell profile (`$PROFILE`).
+
+### 3. Run Claude Code
+
+```bash
+claude
+```
+
+Claude will automatically connect to the SEMOSS MCP servers, verify your setup, and walk you through any remaining configuration (like setting your project ID).
+
+## Alternative: Let Claude Guide You
+
+Just clone and run `claude` without setting environment variables first. Claude will detect the missing credentials and tell you exactly what to set. You'll need to restart `claude` after setting them so the MCP servers reconnect.
 
 ## Prerequisites
 
@@ -29,64 +63,32 @@ python3 --version   # 3.10+
 npx --version       # 11.x+
 ```
 
-## Setup Steps
+## What's Included
 
-### 1. Copy the template into your project
+| File | Purpose |
+|------|---------|
+| `CLAUDE.md` | Project instructions for Claude Code — SEMOSS workflows, conventions, constraints |
+| `.mcp.json` | MCP server config with 3 SEMOSS servers — uses `${env:VAR}` references for credentials |
+| `semoss_config/config.json` | SEMOSS project metadata (project ID, base URL, module) |
+| `scripts/semoss_asset_sync.py` | Upload local files to SEMOSS and sync remote assets to local |
+| `.gitignore` | Git ignore rules for temp files and OS artifacts |
 
-```bash
-mkdir my-semoss-app && cd my-semoss-app
-git init
+## How Credentials Work
 
-# Copy template files
-cp -r path/to/vibe-coding-setup/* .
-```
-
-### 2. Configure SEMOSS project metadata
-
-```bash
-mkdir -p semoss_config
-cp semoss_config.example.json semoss_config/config.json
-```
-
-Edit `semoss_config/config.json` with your project details:
+`.mcp.json` uses Claude Code's `${env:VAR}` syntax to reference environment variables:
 
 ```json
-{
-  "project_id": "your-actual-project-id",
-  "module": "/cfg-ai-dev/Monolith",
-  "created_on": "2026-03-26",
-  "base_url": "https://workshop.cfg.deloitte.com/"
-}
+"--header",
+"Authorization:Bearer${env:SEMOSS_ACCESS_KEY}:${env:SEMOSS_SECRET_KEY}"
 ```
 
-### 3. Configure MCP servers
+Claude Code resolves these at MCP server startup. Since the file contains only variable references (not actual secrets), it's safe to track in git.
 
-```bash
-cp mcp.json.example .mcp.json
-```
-
-Edit `.mcp.json` and replace the credential placeholders:
-
-- Replace `YOUR_ACCESS_KEY` with your SEMOSS access key
-- Replace `YOUR_SECRET_KEY` with your SEMOSS secret key
-
-Claude Code reads `.mcp.json` from the project root automatically — no merge step needed.
-
-> **Security:** Add `.mcp.json` to your `.gitignore` — it contains credentials.
-
-### 4. Start Claude Code
-
-```bash
-claude
-```
-
-Claude will automatically discover the MCP servers defined in `.mcp.json` and load the project instructions from `CLAUDE.md`.
-
-As an initial step, ask Claude to list the available SEMOSS MCP tools so you know what's available.
+The `scripts/semoss_asset_sync.py` script also resolves `${env:VAR}` references when reading `.mcp.json`, so it works seamlessly with the same credential setup.
 
 ## .mcp.json Configuration
 
-Claude Code uses a project-level `.mcp.json` file (not a global config). The template defines three SEMOSS MCP servers:
+Claude Code uses a project-level `.mcp.json` file. Three SEMOSS MCP servers are pre-configured:
 
 | Server | Engine ID | Purpose |
 |--------|-----------|---------|
@@ -95,23 +97,6 @@ Claude Code uses a project-level `.mcp.json` file (not a global config). The tem
 | `Semoss_database_helper` | `394404bf-02e5-44b2-bc7c-e93d9b698f58` | Database operations — create, query, schema |
 
 If you're using a different SEMOSS instance, update `base_url` and `module` in both `.mcp.json` URLs and `semoss_config/config.json`.
-
-### Credential security improvement
-
-Instead of hardcoding credentials in `.mcp.json`, you can use environment variables:
-
-```bash
-# Add to ~/.zshrc or ~/.bashrc
-export SEMOSS_ACCESS_KEY="your-access-key"
-export SEMOSS_SECRET_KEY="your-secret-key"
-```
-
-Then reference them in `.mcp.json` using Claude Code's `${env:VAR}` syntax:
-
-```json
-"--header",
-"Authorization:Bearer${env:SEMOSS_ACCESS_KEY}:${env:SEMOSS_SECRET_KEY}"
-```
 
 ## Asset Sync Script
 
@@ -137,13 +122,10 @@ python scripts/semoss_asset_sync.py sync-from-remote portals --local-dir portals
 ### Behavior
 
 - Reads project config from `semoss_config/config.json`
-- Reads credentials from `.mcp.json` (Claude Code format) or falls back to `.vscode/mcp.json` (Copilot format)
+- Reads credentials from `.mcp.json` (resolves `${env:VAR}` references) or falls back to `.vscode/mcp.json`
 - Backs up existing remote files before overwrite (saved to `temp/semoss_backups/`)
 - Publishes the project after upload so changes take effect
-
-### Dependencies
-
-The script uses only Python standard library modules. If `requests` is installed, it uses that for downloads; otherwise falls back to `urllib`.
+- Uses only Python standard library modules (`requests` used for downloads if available, otherwise `urllib`)
 
 ## SEMOSS URL Patterns
 
@@ -165,10 +147,3 @@ With defaults:
 - Do not install new libraries — use what's available
 - Prefer the SEMOSS MCP tools and the asset sync script for all SEMOSS operations
 - After each meaningful change, sync to SEMOSS and offer the app URL
-
-## Additional Resources
-
-For more context on SEMOSS MCP setup across different AI coding assistants, see:
-
-- [SEMOSS MCP Quick Start](../semoss-mcp-quick-start.md)
-- [SEMOSS MCP Client Setup Guide](../semoss-mcp-client-setup-guide.md)

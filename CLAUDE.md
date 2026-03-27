@@ -7,7 +7,8 @@ This project builds SEMOSS applications. Prefer pragmatic, reviewable changes an
 ```
 my-semoss-app/
 ├── CLAUDE.md                        # This file — project instructions
-├── .mcp.json                        # MCP server configuration (gitignored)
+├── .mcp.json                        # MCP server config (uses env var references)
+├── .gitignore                       # Git ignore rules
 ├── semoss_config/
 │   └── config.json                  # SEMOSS project metadata
 ├── portals/
@@ -41,14 +42,26 @@ If these values are confirmed or changed, update `semoss_config/config.json` and
 
 ## Required Startup Workflow
 
-Before doing substantial work:
+Before doing substantial work, run these checks in order:
 
-1. Check whether the folder is already connected to a SEMOSS project
-2. Look for `semoss_config/config.json` first
-3. If no config exists, offer to create a SEMOSS project
-4. Persist project metadata once known (`project_id`, `module`, `base_url`, `created_on`)
+1. **Check credentials** — run `echo $SEMOSS_ACCESS_KEY` in the shell to see if the env var is set
+   - If empty or unset, tell the user to set their credentials and restart `claude`:
+     - **macOS/Linux:** `export SEMOSS_ACCESS_KEY="..." && export SEMOSS_SECRET_KEY="..."`
+       (add to `~/.zshrc` or `~/.bashrc` to persist)
+     - **Windows PowerShell:** `$env:SEMOSS_ACCESS_KEY="..."` and `$env:SEMOSS_SECRET_KEY="..."`
+   - **Stop here** — MCP servers cannot connect without valid credentials.
+     The user must set the env vars and restart `claude` so MCP servers reconnect.
+   - If the env var has a value, proceed to step 2
 
-If the user wants a non-default SEMOSS instance, ask which instance to use and record it as `base_url`.
+2. **Check project config** — read `semoss_config/config.json`
+   - If `project_id` is empty, ask the user for their project ID (or offer to create a new SEMOSS project)
+   - Persist project metadata once known (`project_id`, `module`, `base_url`, `created_on`)
+   - If the user wants a non-default SEMOSS instance, ask which instance to use and update both `semoss_config/config.json` and the URLs in `.mcp.json`
+
+3. **Verify MCP connectivity** — try using one of the SEMOSS MCP tools
+   - If MCP servers are not responding, credentials may be invalid — tell the user to check their access key and secret key
+
+4. **Orient** — list the available MCP tools so the user knows what capabilities are available
 
 ## semoss_config Requirements
 
@@ -69,12 +82,14 @@ If a new remote project is created, persist the same config into that remote pro
 
 ## MCP Configuration
 
-Claude Code reads `.mcp.json` from the project root automatically.
+Claude Code reads `.mcp.json` from the project root automatically. This file uses
+`${env:SEMOSS_ACCESS_KEY}` and `${env:SEMOSS_SECRET_KEY}` references that Claude Code
+resolves from environment variables at MCP server startup.
 
-- Ask the user for SEMOSS `ACCESS_KEY` and `SECRET_KEY` if the `.mcp.json` still has placeholder values
-- If credentials are already present, confirm and proceed
-- Ask for any unresolved placeholders (`base_url`, module paths, project IDs)
-- As an initial orientation step, list the available MCP tools so the user knows what's available
+**If MCP servers fail to connect**, the most common cause is missing environment variables.
+Tell the user to set them and restart `claude` — MCP servers only read config at startup.
+
+Do NOT write literal credentials into `.mcp.json` — the env var approach keeps secrets out of git.
 
 Three SEMOSS MCP servers are configured:
 
@@ -182,6 +197,6 @@ Offer these URLs to the user when relevant:
 
 - **Forgetting to publish** — Uploaded files are not visible until the project is published
 - **Overwriting without backup** — Always check for existing remote files before upload; use the asset sync script which handles backups automatically
-- **Stale credentials** — If MCP tools stop working, check that credentials in `.mcp.json` are still valid
+- **Stale credentials** — If MCP tools stop working, check that `SEMOSS_ACCESS_KEY` and `SEMOSS_SECRET_KEY` env vars are still valid
 - **Wrong module path** — `api_module_url` (for API calls) and `web_module_url` (for user-facing URLs) are different paths
 - **Base64 schema** — Database schemas from `get_schema()` are Base64-encoded; decode before use
