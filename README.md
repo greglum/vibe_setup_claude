@@ -50,7 +50,8 @@ Just clone and run `claude` without setting environment variables first. Claude 
 | Tool | Version | Purpose | Install |
 |------|---------|---------|---------|
 | **Claude Code** | Latest | AI coding assistant CLI | [claude.ai/download](https://claude.ai/download) |
-| **Node.js** | 24+ | Required for `npx mcp-remote` bridge | [nodejs.org](https://nodejs.org) or `brew install node` |
+| **Node.js** | 20.19+ | Runtime for Vite, React toolchain, `npx mcp-remote` | [nodejs.org](https://nodejs.org) or `brew install node` |
+| **pnpm** | 10.x | Package manager (never npm/yarn) | `corepack enable && corepack prepare pnpm@latest --activate` |
 | **Python** | 3.10+ | Asset sync script | Pre-installed on most systems |
 | **SEMOSS credentials** | — | `ACCESS_KEY` and `SECRET_KEY` from Settings > My Profile | — |
 
@@ -58,20 +59,35 @@ Verify prerequisites:
 
 ```bash
 claude --version    # Claude Code CLI
-node --version      # v24.x+
+node --version      # v20.19+ or v22.12+
+pnpm --version      # 10.x
 python3 --version   # 3.10+
-npx --version       # 11.x+
 ```
 
 ## What's Included
 
 | File | Purpose |
 |------|---------|
-| `CLAUDE.md` | Project instructions for Claude Code — SEMOSS workflows, conventions, constraints |
+| `CLAUDE.md` | Project instructions — React scaffolding, SEMOSS workflows, code conventions |
 | `.mcp.json` | MCP server config with 3 SEMOSS servers — uses `${env:VAR}` references for credentials |
+| `.env.example` | Template for environment variables |
 | `semoss_config/config.json` | SEMOSS project metadata (project ID, base URL, module) |
 | `scripts/semoss_asset_sync.py` | Upload local files to SEMOSS and sync remote assets to local |
-| `.gitignore` | Git ignore rules for temp files and OS artifacts |
+| `.gitignore` | Git ignore rules for Node, Python, temp files, OS artifacts |
+
+## Development Workflow
+
+Once Claude scaffolds the React app, the workflow is:
+
+```bash
+cd client
+pnpm install                  # Install dependencies (first time only)
+pnpm run dev                  # Start dev server with HMR
+pnpm run build                # Build to ../portals/ for SEMOSS deployment
+pnpm dlx shadcn@latest add button  # Add shadcn/ui components as needed
+```
+
+Claude handles scaffolding with: React 19, TypeScript, Vite 8, Tailwind CSS v4, shadcn/ui (Base UI), TanStack Query v5, React Router v7, and Biome for linting.
 
 ## How Credentials Work
 
@@ -142,8 +158,9 @@ With defaults:
 
 ## Working Conventions
 
-- Build the UI as a single-page HTML app unless specified otherwise
+- Claude scaffolds a full React app in `client/` — not a single HTML file
+- Build with `pnpm run build` before deploying to SEMOSS
 - Keep implementations small and reviewable
-- Do not install new libraries — use what's available
+- Use pnpm only — never npm or yarn
 - Prefer the SEMOSS MCP tools and the asset sync script for all SEMOSS operations
 - After each meaningful change, sync to SEMOSS and offer the app URL
