@@ -2,6 +2,20 @@
 
 A template for building SEMOSS web applications with Claude Code. **Clone this repo once per application** — each clone becomes an independent project.
 
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  client/         React SPA (scaffolded by Claude)        │
+├──────────────────────────────────────────────────────────┤
+│  portals/        Build output (deployed to SEMOSS)       │
+├──────────────────────────────────────────────────────────┤
+│  SEMOSS Platform  (remote host, DB, LLM, SDK)            │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Data flow:** Page → Hook → Service → `runPixel()` → SEMOSS SDK → Java Reactor → Database
+
 ## Quick Start
 
 ```bash
@@ -30,29 +44,48 @@ To persist credentials, add the exports to `~/.zshrc` or `~/.bashrc`. On Windows
 | pnpm | 10.x | `corepack enable && corepack prepare pnpm@latest --activate` |
 | Python | 3.10+ | Pre-installed on most systems |
 
-## What's in the Template
+## Directory Guide
 
-| File | Purpose |
-|------|---------|
-| `CLAUDE.md` | Project instructions — scaffolding, conventions, SEMOSS workflows |
-| `.mcp.json` | MCP server config (3 SEMOSS servers, uses `${env:VAR}` for credentials) |
-| `semoss_config/config.json` | SEMOSS project metadata (empty until you configure) |
-| `scripts/semoss_asset_sync.py` | Upload/download files between local and SEMOSS |
-| `.env.example` | Environment variable template |
+| Path | Purpose | Docs |
+|------|---------|------|
+| `CLAUDE.md` | Project instructions — scaffolding, conventions, SEMOSS workflows | — |
+| `.mcp.json` | MCP server config (3 SEMOSS servers, uses `${env:VAR}` for credentials) | — |
+| `semoss_config/config.json` | SEMOSS project metadata (project ID, module, database ID) | — |
+| `scripts/` | Deployment & asset sync tooling | [scripts/README.md](scripts/README.md) |
+| `client/` | React 19 SPA (scaffolded by Claude) | — |
+| `portals/` | Build output (gitignored) — deployed to SEMOSS | — |
+| `.env.example` | Environment variable template | — |
 
-## Development Workflow
+## Development
 
 Once Claude scaffolds the React app in `client/`:
 
 ```bash
 cd client
+pnpm install        # Install dependencies (pnpm only)
 pnpm run dev        # Dev server with HMR
-pnpm run build      # Build to ../portals/ for SEMOSS deployment
+pnpm run build      # Type-check + build to ../portals/
+pnpm run check:fix  # Lint & format (Biome)
+pnpm run test:run   # Run tests
 ```
 
 Tech stack: React 19, TypeScript, Vite 8, Tailwind CSS v4, shadcn/ui (Base UI), TanStack Query v5, React Router v7, Biome.
 
-## How Credentials Work
+## Deploy
+
+Use `scripts/semoss_asset_sync.py` for deployment — it handles the full workflow (stale asset cleanup, bulk upload, publish):
+
+```bash
+cd client && pnpm run build && cd ..
+python scripts/semoss_asset_sync.py delete portals/assets --yes
+python scripts/semoss_asset_sync.py bulk-upload portals
+```
+
+`bulk-upload` walks `portals/` in a single Python process and publishes once at the end. Delete old assets first because Vite emits new content hashes on every build.
+
+See [scripts/README.md](scripts/README.md) for all commands and workflows.
+
+## Credentials
 
 `.mcp.json` uses `${env:SEMOSS_ACCESS_KEY}` and `${env:SEMOSS_SECRET_KEY}` references — Claude Code resolves these at startup. No secrets in git.
 
@@ -68,18 +101,6 @@ git clone <repo-url> dashboard-app    # App 2
 ```
 
 Each clone maintains its own project ID, `client/` source, and git history. The template provides the scaffolding machinery; Claude builds the app.
-
-## Asset Sync
-
-```bash
-# Upload built files to SEMOSS
-python scripts/semoss_asset_sync.py upload portals/index.html
-
-# Pull remote files locally
-python scripts/semoss_asset_sync.py sync-from-remote portals
-```
-
-The script reads config from `semoss_config/config.json`, backs up remote files before overwriting, and publishes after upload.
 
 ## SEMOSS URLs
 

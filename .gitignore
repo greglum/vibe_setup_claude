@@ -24,6 +24,12 @@ portals/
 # Temporary files and backups
 temp/
 
+# Screenshots — keep the directory + README, ignore the actual captures.
+# Use `screenshots/*` (not `screenshots/`) so the negation below can re-include
+# the README; git can't un-ignore files inside an ignored directory.
+screenshots/*
+!screenshots/README.md
+
 # IDE
 .vscode/
 .idea/

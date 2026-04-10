@@ -5,6 +5,11 @@ Reads project config from semoss_config/config.json and credentials from
 
 Usage:
     python scripts/semoss_asset_sync.py upload portals/index.html
+    python scripts/semoss_asset_sync.py upload portals/index.html --yes --no-publish
+    python scripts/semoss_asset_sync.py bulk-upload portals --no-publish
+    python scripts/semoss_asset_sync.py bulk-upload portals java
+    python scripts/semoss_asset_sync.py delete portals/assets --yes
+    python scripts/semoss_asset_sync.py publish
     python scripts/semoss_asset_sync.py portals/index.html
     python scripts/semoss_asset_sync.py sync-from-remote portals
     python scripts/semoss_asset_sync.py sync-from-remote portals --local-dir portals --overwrite
@@ -448,12 +453,198 @@ def sync_remote_folder_to_local(
     }
 
 
+def collect_files_from_paths(raw_paths: list[str]) -> list[Path]:
+    """Resolve a mix of file/directory paths into a deduped, sorted list of files.
+
+    Directories are walked recursively. Hidden files (leading dot) are included
+    only if explicitly named, not when discovered via directory walk — this
+    keeps stray editor files (.DS_Store, .swp) out of bulk uploads.
+    """
+    collected: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add_file(file_path: Path) -> None:
+        if file_path in seen:
+            return
+        seen.add(file_path)
+        collected.append(file_path)
+
+    for raw in raw_paths:
+        path = Path(raw).expanduser().resolve()
+        if not path.exists():
+            raise SystemExit(f"Path not found: {path}")
+        if path.is_file():
+            _add_file(path)
+            continue
+        if path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if not child.is_file():
+                    continue
+                if any(part.startswith(".") for part in child.relative_to(path).parts):
+                    continue
+                _add_file(child.resolve())
+            continue
+        raise SystemExit(f"Path is neither file nor directory: {path}")
+
+    return collected
+
+
+def list_existing_remote_filenames(
+    server_connection,
+    project_id: str,
+    remote_directory: str,
+) -> set[str]:
+    """Return the set of file (non-directory) names that already exist in a remote dir."""
+    return {
+        str(item.get("name", ""))
+        for item in browse_remote_directory(server_connection, project_id, remote_directory)
+        if item.get("type") != "directory" and item.get("name")
+    }
+
+
+def bulk_upload_to_semoss(
+    local_files: list[Path],
+    project_id: str,
+    server_connection,
+    *,
+    publish: bool = True,
+    delete_existing: bool = True,
+) -> int:
+    """Upload many files in one process, reusing one ServerClient and insight.
+
+    Differences from upload_local_file_to_semoss:
+      - No backups (build artifacts are reproducible; backups are dead weight)
+      - No per-file publish — at most one publish call at the very end
+      - One BrowseAsset call per unique remote parent directory, not per file
+      - Bails without publishing on any failure (avoids inconsistent project state)
+    """
+    if not local_files:
+        print("No files to upload.")
+        return 0
+
+    # Preflight: validate every file before touching the network.
+    for local_file in local_files:
+        if not local_file.exists() or not local_file.is_file():
+            raise SystemExit(f"Local file not found: {local_file}")
+        if WORKSPACE_ROOT not in local_file.parents:
+            raise SystemExit(
+                f"Local file must be inside the current workspace: {local_file}"
+            )
+
+    insight_id = f"{server_connection.make_new_insight()}"
+
+    # Group files by their inferred remote parent directory so each unique
+    # parent dir is browsed at most once instead of once per file.
+    files_by_remote_dir: dict[str, list[Path]] = {}
+    for local_file in local_files:
+        remote_dir = infer_remote_directory(local_file)
+        files_by_remote_dir.setdefault(remote_dir, []).append(local_file)
+
+    existing_per_dir: dict[str, set[str]] = {}
+    if delete_existing:
+        for remote_dir in files_by_remote_dir:
+            existing_per_dir[remote_dir] = list_existing_remote_filenames(
+                server_connection, project_id, remote_dir
+            )
+
+    uploaded: list[str] = []
+    deleted: list[str] = []
+
+    print(
+        f"Bulk uploading {len(local_files)} file(s) across "
+        f"{len(files_by_remote_dir)} remote directory(ies). Insight: {insight_id}"
+    )
+
+    try:
+        for remote_dir, files in files_by_remote_dir.items():
+            existing = existing_per_dir.get(remote_dir, set())
+            for local_file in files:
+                remote_file_path = infer_remote_file_path(local_file)
+                if delete_existing and local_file.name in existing:
+                    delete_remote_asset(server_connection, project_id, remote_file_path)
+                    deleted.append(remote_file_path)
+
+                server_connection.upload_files(
+                    files=[str(local_file)],
+                    project_id=project_id,
+                    insight_id=insight_id,
+                    path=remote_dir,
+                )
+                uploaded.append(str(local_file))
+                print(f"  uploaded: {local_file.relative_to(WORKSPACE_ROOT)}")
+    except Exception as exc:
+        # Bail without publishing — leaves the project in a partial state on
+        # disk but avoids "publishing" a known-broken release. The next deploy
+        # attempt will overwrite the half-uploaded files.
+        print(
+            f"ERROR: Bulk upload failed after {len(uploaded)} upload(s) "
+            f"and {len(deleted)} delete(s): {exc}"
+        )
+        print("Skipping publish — project not republished.")
+        return 1
+
+    print(f"Bulk upload complete: {len(uploaded)} uploaded, {len(deleted)} replaced.")
+
+    if publish:
+        print("Publishing project...")
+        result = publish_project(server_connection, project_id)
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print("Skipping publish (--no-publish).")
+    return 0
+
+
+COMMAND_NAMES = frozenset(
+    {"upload", "bulk-upload", "delete", "publish", "sync-from-remote"}
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Upload local assets to SEMOSS or sync remote assets to local.")
     subparsers = parser.add_subparsers(dest="command")
 
-    upload_parser = subparsers.add_parser("upload", help="Upload a local file into the linked SEMOSS project.")
+    upload_parser = subparsers.add_parser("upload", help="Upload a single local file into the linked SEMOSS project.")
     upload_parser.add_argument("file", help="Path to the local file to upload.")
+    upload_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip the overwrite confirmation prompt (non-interactive use).",
+    )
+    upload_parser.add_argument(
+        "--no-publish",
+        action="store_true",
+        help="Skip the post-upload PublishProject call (useful when chaining multiple uploads).",
+    )
+
+    bulk_parser = subparsers.add_parser(
+        "bulk-upload",
+        help="Upload many files (or a directory tree) in one process. Reuses one connection and publishes once.",
+    )
+    bulk_parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Files and/or directories to upload. Directories are walked recursively.",
+    )
+    bulk_parser.add_argument(
+        "--no-publish",
+        action="store_true",
+        help="Skip the final PublishProject call (use when chaining multiple bulk-upload invocations).",
+    )
+    bulk_parser.add_argument(
+        "--no-delete-existing",
+        action="store_true",
+        help="Skip the browse-and-delete step. Faster on first deploy when no remote files exist yet.",
+    )
+
+    delete_parser = subparsers.add_parser("delete", help="Delete a remote asset from the linked SEMOSS project.")
+    delete_parser.add_argument("remote_path", help="Remote path relative to project root (e.g., portals/assets/old-file.js).")
+    delete_parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt.")
+
+    subparsers.add_parser(
+        "publish",
+        help="Publish the linked SEMOSS project without uploading anything (use after chained bulk-upload --no-publish).",
+    )
 
     sync_parser = subparsers.add_parser("sync-from-remote", help="Download a remote SEMOSS asset folder into the local workspace.")
     sync_parser.add_argument("remote_folder", help="Remote folder path, relative to version/assets or as a full version/assets path.")
@@ -473,7 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args() -> argparse.Namespace:
     parser = build_parser()
     raw_args = sys.argv[1:]
-    if raw_args and raw_args[0] not in {"upload", "sync-from-remote", "-h", "--help"}:
+    if raw_args and raw_args[0] not in COMMAND_NAMES and raw_args[0] not in {"-h", "--help"}:
         raw_args = ["upload", *raw_args]
     if not raw_args:
         parser.print_help()
@@ -497,7 +688,14 @@ def build_semoss_context() -> tuple[dict[str, str], str, object]:
     return semoss_config, project_id, server_connection
 
 
-def upload_local_file_to_semoss(local_file: Path, project_id: str, server_connection) -> int:
+def upload_local_file_to_semoss(
+    local_file: Path,
+    project_id: str,
+    server_connection,
+    *,
+    assume_yes: bool = False,
+    publish: bool = True,
+) -> int:
     if not local_file.exists() or not local_file.is_file():
         raise SystemExit(f"Local file not found: {local_file}")
     if WORKSPACE_ROOT not in local_file.parents and local_file != WORKSPACE_ROOT:
@@ -509,7 +707,7 @@ def upload_local_file_to_semoss(local_file: Path, project_id: str, server_connec
 
     remote_exists = remote_asset_exists(server_connection, project_id, remote_file_path)
     if remote_exists:
-        if not confirm_remote_delete(remote_file_path):
+        if not assume_yes and not confirm_remote_delete(remote_file_path):
             raise SystemExit("Upload cancelled because the existing remote asset was not approved for deletion.")
 
         backup_path = download_remote_asset(
@@ -525,12 +723,13 @@ def upload_local_file_to_semoss(local_file: Path, project_id: str, server_connec
         print(f"Deleted remote asset: {remote_file_path}")
         print(json.dumps(delete_result, indent=2, default=str))
 
-        delete_publish_result = publish_project(server_connection, project_id)
-        print("Published project after deletion")
-        print(json.dumps(delete_publish_result, indent=2, default=str))
+        if publish:
+            delete_publish_result = publish_project(server_connection, project_id)
+            print("Published project after deletion")
+            print(json.dumps(delete_publish_result, indent=2, default=str))
 
-        post_delete_listing = browse_remote_directory(server_connection, project_id, remote_directory)
-        print_directory_state("Remote directory after deletion:", post_delete_listing)
+            post_delete_listing = browse_remote_directory(server_connection, project_id, remote_directory)
+            print_directory_state("Remote directory after deletion:", post_delete_listing)
 
     upload_result = server_connection.upload_files(
         files=[str(local_file)],
@@ -539,18 +738,21 @@ def upload_local_file_to_semoss(local_file: Path, project_id: str, server_connec
         path=remote_directory,
     )
 
-    publish_result = publish_project(server_connection, project_id)
-    final_listing = browse_remote_directory(server_connection, project_id, remote_directory)
-
     print(f"Uploaded {local_file}")
     print(f"Project: {project_id}")
     print(f"Insight: {insight_id}")
     print(f"Remote directory: {remote_directory}")
     print(f"Remote asset: {remote_file_path}")
     print(json.dumps(upload_result, indent=2, default=str))
-    print("Published project after upload")
-    print(json.dumps(publish_result, indent=2, default=str))
-    print_directory_state("Remote directory after upload:", final_listing)
+
+    if publish:
+        publish_result = publish_project(server_connection, project_id)
+        final_listing = browse_remote_directory(server_connection, project_id, remote_directory)
+        print("Published project after upload")
+        print(json.dumps(publish_result, indent=2, default=str))
+        print_directory_state("Remote directory after upload:", final_listing)
+    else:
+        print("Skipping publish (--no-publish).")
     return 0
 
 
@@ -573,15 +775,122 @@ def sync_semoss_folder_to_local(remote_folder: str, local_dir: str | None, overw
     return 0
 
 
+def delete_remote_assets(remote_path: str, skip_confirm: bool) -> int:
+    _, project_id, server_connection = build_semoss_context()
+    normalized = normalize_remote_asset_path(remote_path)
+
+    entry = get_remote_asset_entry(server_connection, project_id, normalized)
+    if entry is None:
+        print(f"Remote path not found: {normalized}")
+        return 1
+
+    is_directory = entry.get("type") == "directory"
+
+    if is_directory:
+        items = browse_remote_directory(server_connection, project_id, normalized)
+        files_to_delete = []
+        for item in items:
+            if item.get("type") == "directory":
+                sub_items = browse_remote_directory(server_connection, project_id, item["path"])
+                files_to_delete.extend(sub_item["path"] for sub_item in sub_items if sub_item.get("type") != "directory")
+            else:
+                files_to_delete.append(item["path"])
+
+        if not files_to_delete:
+            print(f"No files found in {normalized}")
+            return 0
+
+        print(f"Files to delete ({len(files_to_delete)}):")
+        for f in files_to_delete:
+            print(f"  {f}")
+
+        if not skip_confirm:
+            response = input(f"\nDelete all {len(files_to_delete)} files? [y/N]: ")
+            if response.strip().lower() not in {"y", "yes"}:
+                print("Cancelled.")
+                return 0
+    else:
+        files_to_delete = [normalized]
+        if not skip_confirm:
+            response = input(f"Delete remote asset {normalized}? [y/N]: ")
+            if response.strip().lower() not in {"y", "yes"}:
+                print("Cancelled.")
+                return 0
+
+    for f in files_to_delete:
+        try:
+            result = delete_remote_asset(server_connection, project_id, f)
+            print(f"Deleted: {f} -> {result}")
+        except Exception as e:
+            print(f"Failed to delete {f}: {e}")
+
+    publish_result = publish_project(server_connection, project_id)
+    print(f"\nPublished project after deletion")
+    print(json.dumps(publish_result, indent=2, default=str))
+
+    parent_path = normalized.rpartition("/")[0] or "version/assets"
+    final_listing = browse_remote_directory(server_connection, project_id, parent_path)
+    print_directory_state("Remote directory after deletion:", final_listing)
+    return 0
+
+
+def bulk_upload_command(
+    raw_paths: list[str],
+    *,
+    no_publish: bool,
+    no_delete_existing: bool,
+) -> int:
+    files = collect_files_from_paths(raw_paths)
+    if not files:
+        print("No files matched the provided paths.")
+        return 0
+
+    _, project_id, server_connection = build_semoss_context()
+    return bulk_upload_to_semoss(
+        local_files=files,
+        project_id=project_id,
+        server_connection=server_connection,
+        publish=not no_publish,
+        delete_existing=not no_delete_existing,
+    )
+
+
+def publish_command() -> int:
+    _, project_id, server_connection = build_semoss_context()
+    print(f"Publishing project {project_id}...")
+    result = publish_project(server_connection, project_id)
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
 def main() -> int:
     args = parse_args()
 
     if args.command == "sync-from-remote":
         return sync_semoss_folder_to_local(args.remote_folder, args.local_dir, args.overwrite)
 
+    if args.command == "delete":
+        return delete_remote_assets(args.remote_path, args.yes)
+
+    if args.command == "bulk-upload":
+        return bulk_upload_command(
+            args.paths,
+            no_publish=args.no_publish,
+            no_delete_existing=args.no_delete_existing,
+        )
+
+    if args.command == "publish":
+        return publish_command()
+
     _, project_id, server_connection = build_semoss_context()
     local_file = Path(args.file).expanduser().resolve()
-    return upload_local_file_to_semoss(local_file, project_id, server_connection)
+    return upload_local_file_to_semoss(
+        local_file,
+        project_id,
+        server_connection,
+        assume_yes=args.yes,
+        publish=not args.no_publish,
+    )
 
 
 if __name__ == "__main__":
